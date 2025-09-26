@@ -3,7 +3,7 @@ An easy Minecraft Launcher
 
 Just the author has nothing to do and suddenly want to do it.
 
-Now it's only has CLI and only allow Minecraft without Mod Loader. And it only allow offline login.
+Now it's only has CLI and only allow Minecraft without Mod Loader( supported some Fabric versions, Forge, NeoForge was not supported). And it only allow offline login.
 
 It uses offical source(It may take long time to download files in some places...)
 
