@@ -3,10 +3,22 @@
 #include <string.h>
 #include <urlmon.h>
 #include <windows.h>
+#include <pthread.h>
 LPJSONOBJ lpJsonObj,lpTmp;
 JsonObjectType FT;
-char FileText[1145141], VersionPath[1145], *CreateDirs[32768], *DownloadFiles[32768][2], Tmp[32768], VersionName[128], Arg[114514], AssetsVer[256], mainClass[256], HerePath[32768], ClassPath[32768], NativesDirectory[32768];
-int cCreateDirs, cDownloads, JavaVersion;
+char FileText[1145141], ModLoader[32], VersionPath[1145], *CreateDirs[32768], *DownloadFiles[32768][2], Tmp[32768], VersionName[128], Arg[114514], AssetsVer[256], mainClass[256], HerePath[32768], ClassPath[32768], NativesDirectory[32768];
+int cCreateDirs, cDownloads, JavaVersion, Downloaded = 0, ASM = 0;
+pthread_mutex_t thread_lock;
+void* DownloadThread(void *lParam) {
+	char **DownloadFile = (char**)lParam;
+	URLDownloadToFileA(NULL, DownloadFile[0], DownloadFile[1], 0, NULL);
+	pthread_mutex_lock(&thread_lock);
+	Downloaded += 1;
+	pthread_mutex_unlock(&thread_lock);
+	free(DownloadFile[0]);
+	free(DownloadFile[1]);
+	return NULL;
+}
 void PushDir(LPCSTR Format,...){
 	va_list valst;
 	va_start(valst,Format);
@@ -132,6 +144,7 @@ int main(){
 	}
 	HerePath[ThisIndex]='\0';
 	CreateDirectory("NMCL", NULL);
+	CreateDirectory("NMCL\\Temp", NULL);
 	CreateDirectory(".minecraft", NULL);
 	CreateDirectory(".minecraft\\assets", NULL);
 	CreateDirectory(".minecraft\\assets\\indexes", NULL);
@@ -163,53 +176,300 @@ int main(){
 		lpTmp = lpTmp -> Next;
 	} 
 	if(lpTmp == NULL) {
-		printf("ERROR: Non-existent version %s\n", VersionName);
+		printf("\rERROR: Non-existent version %s\n", VersionName);
 		goto SelectVersion;
 	}
-	sprintf(VersionPath, "%s\\.minecraft\\versions\\%s\\%s.json", HerePath, VersionName, VersionName);
-	printf("Downloading version manifest file %s...", lpTmp -> Childs -> Next -> Next -> lpstrValue);
-	URLDownloadToFileA(NULL, lpTmp -> Childs -> Next -> Next -> lpstrValue, VersionPath, 0, NULL);
-	printf("\rDownloaded version manifest file %s.json successfully! File Path: %s\n", VersionName, VersionPath);
+	printf("Please select the Mod Loader(Vanilla, Fabric): ");
+	scanf("%s", ModLoader);
+	PushDir(".minecraft\\libraries");
+	if(strcmp(ModLoader, "Fabric") == 0) {
+		sprintf(VersionPath, "%s\\NMCL\\fabric_manifest.json", HerePath);
+		sprintf(Tmp, "https://meta.fabricmc.net/v2/versions/loader/%s", VersionName);
+		URLDownloadToFileA(NULL, Tmp, VersionPath, 0, NULL);
+		lpFile = fopen(VersionPath, "r");
+		memset(FileText, 0, sizeof(FileText));
+		size = fread(FileText, 1, sizeof(FileText), lpFile);
+		fclose(lpFile);
+		LPJSONOBJ lpFabricList = BuildJson(FileText, size, NULL), OldlpTmp = lpTmp;
+		SelectFabricVersion:
+		printf("Fabric Loader Version List: \n");
+		lpTmp = lpFabricList;
+		while(lpTmp != NULL) {
+			printf("  %s(%s)\n", lpTmp -> Childs -> Childs -> Next -> Next -> Next -> lpstrValue, ((lpTmp -> Childs -> Childs -> Next -> Next -> Next -> Next -> TorF == 1) ? "Stable" : "Not Stable"));
+			lpTmp = lpTmp -> Next;
+		}
+		printf("Please input the fabric loader version: ");
+		scanf("%s", ModLoader);
+		lpTmp = lpFabricList;
+		while(lpTmp != NULL) {
+			if(strcmp(lpTmp -> Childs -> Childs -> Next -> Next -> Next -> lpstrValue, ModLoader) == 0) {
+				printf("Fabric Loader Version Found!\n");
+				break;
+			}
+			lpTmp = lpTmp -> Next;
+		}
+		if(lpTmp == NULL) {
+			printf("Fabric Loader Version Not Found!\n");
+			goto SelectFabricVersion;
+		}
+		sprintf(Tmp, "%s\\.minecraft\\versions\\%s-fabric-%s", HerePath, VersionName, ModLoader);
+		CreateDirectory(Tmp, NULL);
+		sprintf(NativesDirectory, "%s\\.minecraft\\versions\\%s-fabric-%s\\%s-fabric-%s-natives", HerePath, VersionName, ModLoader, VersionName, ModLoader);
+		CreateDirectory(NativesDirectory, NULL);
+		sprintf(Tmp, "https://meta.fabricmc.net/v2/versions/loader/%s/%s", VersionName, ModLoader);
+		sprintf(VersionPath, "%s\\.minecraft\\versions\\%s-fabric-%s\\%s-fabric-%s.json", HerePath, VersionName, ModLoader, VersionName, ModLoader);
+		//printf("Downloading from \"%s\" to \"%s\"...\n", Tmp, VersionPath);
+		URLDownloadToFile(NULL, Tmp, VersionPath, 0, NULL);
+		
+		FILE* lpFile = fopen(VersionPath, "r");
+		printf("Fabric Version Manifest file analysis completed!\n");
+		memset(FileText, 0, sizeof(FileText));
+		size = fread(FileText, 1, sizeof(FileText), lpFile);
+		fclose(lpFile);
+		lpFabricList = BuildJson(FileText, size, NULL);
+		LPJSONOBJ lpLibraries = lpFabricList;
+		while(lpLibraries != NULL) {
+			if(strcmp(lpLibraries -> lpstrKey, "loader") == 0) {
+				sprintf(Tmp, "https://maven.fabricmc.net/%s/", lpLibraries -> Childs -> Next -> Next -> lpstrValue);
+				int i, lst = 0;
+				for(i = strlen(Tmp); i >= strlen("https://maven.fabricmc.net/"); i -= 1) {
+					if(Tmp[i] == ':') Tmp[i] = '/', lst = 1;
+					if(lst == 1 && Tmp[i] == '.') Tmp[i] = '/';
+				}
+				memset(VersionPath, 0, sizeof(VersionPath));
+				sprintf(VersionPath, "%s\\.minecraft\\libraries\\", HerePath);
+				for(i = strlen("https://maven.fabricmc.net/"); i <= strlen(Tmp); i += 1) {
+					if(Tmp[i] == '/') {
+						PushDir(VersionPath);
+						VersionPath[strlen(VersionPath)] = '\\';
+					}
+					else VersionPath[strlen(VersionPath)] = Tmp[i];
+				}
+				lst = 0;
+				for(i = strlen(lpLibraries -> Childs -> Next -> Next -> lpstrValue); i >= 0; i -= 1) {
+					if(lpLibraries -> Childs -> Next -> Next -> lpstrValue[i] == ':') {
+						if(lst != 0) {
+							int oldlen = strlen(Tmp);
+							strcat(Tmp, lpLibraries -> Childs -> Next -> Next -> lpstrValue + i + 1);
+							Tmp[lst - i + oldlen - 1] = '-';
+							strcat(Tmp, ".jar");
+							memset(VersionPath, 0, sizeof(VersionPath));
+							sprintf(VersionPath, "%s\\.minecraft\\libraries\\%s\\", HerePath, lpLibraries -> Childs -> Next -> Next -> lpstrValue);
+							int j;
+							lst = 0;
+							for(j = strlen(VersionPath) - 1; j >= strlen(HerePath) + strlen("\\.minecraft\\"); j -= 1) {
+								if(VersionPath[j] == ':') {
+									VersionPath[j] = '\\';
+									lst = 1;
+								}
+								if(lst == 1 && VersionPath[j] == '.') VersionPath[j] = '\\';
+							}
+							oldlen = strlen(VersionPath);
+							strcat(VersionPath, lpLibraries -> Childs -> Next -> Next -> lpstrValue + i + 1);
+							for(j = strlen(VersionPath) - 1; j >= oldlen; j -= 1) {
+								if(VersionPath[j] == ':') {
+									VersionPath[j] = '-';
+								}
+							}
+							strcat(VersionPath, ".jar");
+							PushFile(Tmp, VersionPath);
+							sprintf(ClassPath + strlen(ClassPath), "%s;", VersionPath);
+							break;
+						}
+						else lst = i;
+					}
+				}
+			}
+			//else if(strcmp(lpLibraries -> lpstrKey, "intermediary") == 0) {
+			else if(strcmp(lpLibraries -> lpstrKey, "intermediary") == 0) {
+				sprintf(Tmp, "https://maven.fabricmc.net/%s/", lpLibraries -> Childs -> lpstrValue);
+				int i, lst = 0;
+				for(i = strlen(Tmp); i >= strlen("https://maven.fabricmc.net/"); i -= 1) {
+					if(Tmp[i] == ':') Tmp[i] = '/', lst = 1;
+					if(lst == 1 && Tmp[i] == '.') Tmp[i] = '/';
+				}
+				memset(VersionPath, 0, sizeof(VersionPath));
+				sprintf(VersionPath, "%s\\.minecraft\\libraries\\", HerePath);
+				for(i = strlen("https://maven.fabricmc.net/"); i <= strlen(Tmp); i += 1) {
+					if(Tmp[i] == '/') {
+						PushDir(VersionPath);
+						VersionPath[strlen(VersionPath)] = '\\';
+					}
+					else VersionPath[strlen(VersionPath)] = Tmp[i];
+				}
+				lst = 0;
+				for(i = strlen(lpLibraries -> Childs -> lpstrValue); i >= 0; i -= 1) {
+					if(lpLibraries -> Childs -> lpstrValue[i] == ':') {
+						if(lst != 0) {
+							int oldlen = strlen(Tmp);
+							strcat(Tmp, lpLibraries -> Childs -> lpstrValue + i + 1);
+							Tmp[lst - i + oldlen - 1] = '-';
+							strcat(Tmp, ".jar");
+							memset(VersionPath, 0, sizeof(VersionPath));
+							sprintf(VersionPath, "%s\\.minecraft\\libraries\\%s\\", HerePath, lpLibraries -> Childs -> lpstrValue);
+							int j;
+							lst = 0;
+							for(j = strlen(VersionPath) - 1; j >= strlen(HerePath) + strlen("\\.minecraft\\"); j -= 1) {
+								if(VersionPath[j] == ':') {
+									VersionPath[j] = '\\';
+									lst = 1;
+								}
+								if(lst == 1 && VersionPath[j] == '.') VersionPath[j] = '\\';
+							}
+							oldlen = strlen(VersionPath);
+							strcat(VersionPath, lpLibraries -> Childs -> lpstrValue + i + 1);
+							for(j = strlen(VersionPath) - 1; j >= oldlen; j -= 1) {
+								if(VersionPath[j] == ':') {
+									VersionPath[j] = '-';
+								}
+							}
+							strcat(VersionPath, ".jar");
+							PushFile(Tmp, VersionPath);
+							sprintf(ClassPath + strlen(ClassPath), "%s;", VersionPath);
+							break;
+						}
+						else lst = i;
+					}
+				}
+			}
+			else if(strcmp(lpLibraries -> lpstrKey, "launcherMeta") == 0) {
+				lpLibraries = lpLibraries -> Childs;
+				while(lpLibraries != NULL) {
+					if(strcmp(lpLibraries -> lpstrKey, "libraries") == 0) {
+						lpTmp = lpLibraries -> Childs;
+						while(lpTmp != NULL) {
+							if(strcmp(lpTmp -> lpstrKey, "client") == 0 || strcmp(lpTmp -> lpstrKey, "common") == 0) {
+								LPJSONOBJ lpLibs = lpTmp -> Childs;
+								while(lpLibs != NULL) {
+									/*if(strncmp("org.ow2.asm:asm:", lpLibs -> Childs -> lpstrValue, strlen("org.ow2.asm:asm:")) == 0) {
+										lpLibs = lpLibs -> Next;
+										continue;
+									}*/
+									if(strncmp("org.ow2.asm:asm:", lpLibs -> Childs -> lpstrValue, strlen("org.ow2.asm:asm:")) == 0) {
+										ASM = 1;
+									}
+									sprintf(Tmp, "%s%s/", lpLibs -> Childs -> Next -> lpstrValue, lpLibs -> Childs -> lpstrValue);
+									int i, lst = 0;
+									for(i = strlen(Tmp); i >= strlen(lpLibs -> Childs -> Next -> lpstrValue); i -= 1) {
+										if(Tmp[i] == ':') Tmp[i] = '/', lst = 1;
+										if(lst == 1 && Tmp[i] == '.') Tmp[i] = '/';
+									}
+									memset(VersionPath, 0, sizeof(VersionPath));
+									sprintf(VersionPath, "%s\\.minecraft\\libraries\\", HerePath);
+									for(i = strlen(lpLibs -> Childs -> Next -> lpstrValue); i <= strlen(Tmp); i += 1) {
+										if(Tmp[i] == '/') {
+											PushDir(VersionPath);
+											VersionPath[strlen(VersionPath)] = '\\';
+										}
+										else VersionPath[strlen(VersionPath)] = Tmp[i];
+									}
+									lst = 0;
+									for(i = strlen(lpLibs -> Childs -> lpstrValue); i >= 0; i -= 1) {
+										if(lpLibs -> Childs -> lpstrValue[i] == ':') {
+											if(lst != 0) {
+												int oldlen = strlen(Tmp);
+												strcat(Tmp, lpLibs -> Childs -> lpstrValue + i + 1);
+												Tmp[lst - i + oldlen - 1] = '-';
+												strcat(Tmp, ".jar");
+												memset(VersionPath, 0, sizeof(VersionPath));
+												sprintf(VersionPath, "%s\\.minecraft\\libraries\\%s\\", HerePath, lpLibs -> Childs -> lpstrValue);
+												int j;
+												lst = 0;
+												for(j = strlen(VersionPath) - 1; j >= strlen(HerePath) + strlen("\\.minecraft\\"); j -= 1) {
+													if(VersionPath[j] == ':') {
+														VersionPath[j] = '\\';
+														lst = 1;
+													}
+													if(lst == 1 && VersionPath[j] == '.') VersionPath[j] = '\\';
+												}
+												oldlen = strlen(VersionPath);
+												strcat(VersionPath, lpLibs -> Childs -> lpstrValue + i + 1);
+												for(j = strlen(VersionPath) - 1; j >= oldlen; j -= 1) {
+													if(VersionPath[j] == ':') {
+														VersionPath[j] = '-';
+													}
+												}
+												strcat(VersionPath, ".jar");
+												PushFile(Tmp, VersionPath);
+												sprintf(ClassPath + strlen(ClassPath), "%s;", VersionPath);
+												break;
+											}
+											else lst = i;
+										}
+									}
+									lpLibs = lpLibs -> Next;
+								}
+							}
+							lpTmp = lpTmp -> Next;
+						}
+					}
+					else if(strcmp(lpLibraries -> lpstrKey, "mainClass") == 0) {
+						strcpy(mainClass, lpLibraries -> Childs -> lpstrValue);
+					}
+					lpLibraries = lpLibraries -> Next;
+				}
+				break;
+			}
+			lpLibraries = lpLibraries -> Next;
+		}
+		
+		lpTmp = OldlpTmp;
+		sprintf(VersionPath, "%s\\.minecraft\\versions\\%s-fabric-%s\\%s.json", HerePath, VersionName, ModLoader, VersionName);
+		printf("Downloading version manifest file %s...", lpTmp -> Childs -> Next -> Next -> lpstrValue);
+		URLDownloadToFileA(NULL, lpTmp -> Childs -> Next -> Next -> lpstrValue, VersionPath, 0, NULL);
+		printf("\rDownloaded version manifest file %s.json successfully! File Path: %s\n", VersionName, VersionPath);
+		sprintf(VersionName + strlen(VersionName), "-fabric-%s", ModLoader);
+		CloseJson(lpFabricList);
+	}
+	else {
+		sprintf(VersionPath, "%s\\.minecraft\\versions\\%s", HerePath, lpTmp -> lpstrValue);
+		CreateDirectory(VersionPath, NULL);
+		sprintf(NativesDirectory, "%s\\.minecraft\\versions\\%s\\%s-natives", HerePath, lpTmp -> lpstrValue);
+		CreateDirectory(NativesDirectory, NULL);
+		sprintf(VersionPath, "%s\\.minecraft\\versions\\%s\\%s.json", HerePath, VersionName, VersionName);
+		printf("Downloading version manifest file %s...", lpTmp -> Childs -> Next -> Next -> lpstrValue);
+		URLDownloadToFileA(NULL, lpTmp -> Childs -> Next -> Next -> lpstrValue, VersionPath, 0, NULL);
+		printf("\rDownloaded version manifest file %s.json successfully! File Path: %s\n", VersionName, VersionPath);
+		//sprintf(VersionPath, "%s\\.minecraft\\versions\\%s", HerePath, lpTmp -> lpstrValue);
+	}
 	CloseJson(lpJsonObj);
 	lpFile = fopen(VersionPath/*"MC1.21.4.json"*/, "r");
-	memset(VersionPath, 0, sizeof(VersionPath));
-	memset(VersionName, 0, sizeof(VersionName));
+	//memset(VersionName, 0, sizeof(VersionName));
 	if(lpFile == NULL) {
 		printf("ERROR: File Opened failed! Path: %s", VersionPath, strerror(errno));
 		return 0;
 	} 
 	printf("File opened successfully!\n");
+	memset(VersionPath, 0, sizeof(VersionPath));
 	memset(FileText, 0, sizeof(FileText));
 	size = fread(FileText, 1, sizeof(FileText), lpFile);
 	fclose(lpFile);
 	FT = (JsonObjectType)0;
 	lpTmp = lpJsonObj = BuildJson(FileText, size, &FT);
 	printf("Built json successfully!\n");
-	PushDir(".minecraft");
-	PushDir(".minecraft\\versions");
-	PushDir(".minecraft\\assets");
 	PushDir(".minecraft\\assets\\objects");
-	PushDir(".minecraft\\libraries");
 	PushDir("NMCL");
 	// --add-exports cpw.mods.bootstraplauncher/cpw.mods.bootstraplauncher=ALL-UNNAMED
-	sprintf(Arg, "-Dstderr.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dfile.encoding=COMPAT -Djdk.lang.Process.allowAmbiguousCommands=true -Dfml.ignoreInvalidMinecraftCertificates=True -Dfml.ignorePatchDiscrepancies=True -Dlog4j2.formatMsgNoLookups=true -Xmx%dm -Xmn%dm -XX:+UseG1GC -XX:-UseAdaptiveSizePolicy -XX:-OmitStackTraceInFastThrow -XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump -Dos.name=\"Windows 10\" -Dos.version=10.0", 1024, 128);
+	sprintf(Arg, "-Dfile.encoding=COMPAT -Djdk.lang.Process.allowAmbiguousCommands=true -Dfml.ignoreInvalidMinecraftCertificates=True -Dfml.ignorePatchDiscrepancies=True -Dlog4j2.formatMsgNoLookups=true -Xmx%dm -Xmn%dm -XX:+UseG1GC -XX:-UseAdaptiveSizePolicy -XX:-OmitStackTraceInFastThrow -XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump -Dos.name=\"Windows 10\" -Dos.version=10.0", 1024, 128);
 	while(lpTmp!=NULL){
 		printf("Read key %s\n", lpTmp->lpstrKey);
 		if(strcmp(lpTmp->lpstrKey,"downloads")==0){
+			sprintf(VersionPath, "%s\\.minecraft\\versions\\%s", HerePath, VersionName);
 			LPJSONOBJ lpDownloads=lpTmp,lpClient=lpDownloads->Childs;
-			PushFile(lpClient->Childs->Next->Next->lpstrValue,"${version_path}\\${version_name}.jar");
-		}
+			PushFile(lpClient->Childs->Next->Next->lpstrValue, "%s\\%s.jar", VersionPath, VersionName);
+		}/*
 		else if(strcmp(lpTmp -> lpstrKey, "id") == 0) {
 			strcpy(VersionName,lpTmp->lpstrValue);
-			sprintf(VersionPath,"%s\\.minecraft\\versions\\%s",HerePath,lpTmp->lpstrValue);
-			PushDir(VersionPath);
-			CreateDirectory(VersionPath, NULL);
+			//sprintf(VersionPath,"%s\\.minecraft\\versions\\%s",HerePath,lpTmp->lpstrValue);
+			//PushDir(VersionPath);
+			//CreateDirectory(VersionPath, NULL);
 			sprintf(NativesDirectory, "%s\\.minecraft\\versions\\%s\\%s-natives", HerePath, lpTmp -> lpstrValue, lpTmp -> lpstrValue);
 			PushDir(NativesDirectory);
 			CreateDirectory(NativesDirectory, NULL);
-		}
+		}*/
 		else if(strcmp(lpTmp->lpstrKey,"mainClass")==0){
-			strcpy(mainClass,lpTmp->lpstrValue);
+			if(strcmp(mainClass, "") == 0) strcpy(mainClass, lpTmp -> lpstrValue);
+			else sprintf(Arg + strlen(Arg), " -DFabricMcEmu=%s", lpTmp -> lpstrValue);
 		}
 		else if(strcmp(lpTmp -> lpstrKey, "arguments") == 0) {
 			LPJSONOBJ lpArgGame = lpTmp -> Childs -> Childs, Game;
@@ -264,7 +524,13 @@ int main(){
 						}
 						break;
 					}
-					if(strcmp(lpTmp -> lpstrKey, "name") == 0) printf("Solving library %s...\n", lpTmp -> lpstrValue); 
+					if(strcmp(lpTmp -> lpstrKey, "name") == 0) {
+						printf("Solving library %s...\n", lpTmp -> lpstrValue);
+						if(strncmp("org.ow2.asm:asm:", lpTmp -> lpstrValue, strlen("org.ow2.asm:asm:")) == 0 && ASM == 1) {
+							AllowWindows = 0;
+							break;
+						}
+					}
 					lpTmp = lpTmp -> Next;
 				}
 				if(AllowWindows == 0) {
@@ -292,13 +558,28 @@ int main(){
 				}
 				printf("Pushing file...\n");
 				if(strcmp(lpDownloads -> Childs -> Childs -> lpstrKey, "artifact") == 0) {
-					PushFile(lpDownloads->Childs->Childs->Childs->Next->Next->Next->lpstrValue,"%s\\.minecraft\\libraries\\%s",HerePath,lpDownloads->Childs->Childs->Childs->lpstrValue);
 					if(strcmp(lpDownloads->Childs->Childs->Childs->lpstrValue + strlen(lpDownloads->Childs->Childs->Childs->lpstrValue) - 10, "-linux.jar") != 0
 					&& strcmp(lpDownloads->Childs->Childs->Childs->lpstrValue + strlen(lpDownloads->Childs->Childs->Childs->lpstrValue) - 10, "-macos.jar") != 0
 					&& strcmp(lpDownloads->Childs->Childs->Childs->lpstrValue + strlen(lpDownloads->Childs->Childs->Childs->lpstrValue) - 16, "-macos-arm64.jar") != 0
 					&& strcmp(lpDownloads->Childs->Childs->Childs->lpstrValue + strlen(lpDownloads->Childs->Childs->Childs->lpstrValue) - 16, "-windows-x86.jar") != 0
 					&& strcmp(lpDownloads->Childs->Childs->Childs->lpstrValue + strlen(lpDownloads->Childs->Childs->Childs->lpstrValue) - 18, "-windows-arm64.jar") != 0
-					) sprintf(ClassPath + strlen(ClassPath), "%s\\.minecraft\\libraries\\%s;", HerePath,lpDownloads->Childs->Childs->Childs->lpstrValue);
+					&& strcmp(lpDownloads->Childs->Childs->Childs->lpstrValue + strlen(lpDownloads->Childs->Childs->Childs->lpstrValue) - 12, "-windows.jar") != 0
+					) {
+						PushFile(lpDownloads->Childs->Childs->Childs->Next->Next->Next->lpstrValue,"%s\\.minecraft\\libraries\\%s",HerePath,lpDownloads->Childs->Childs->Childs->lpstrValue);
+						sprintf(ClassPath + strlen(ClassPath), "%s\\.minecraft\\libraries\\%s;", HerePath,lpDownloads->Childs->Childs->Childs->lpstrValue);
+					}
+					else if(strcmp(lpDownloads->Childs->Childs->Childs->lpstrValue + strlen(lpDownloads->Childs->Childs->Childs->lpstrValue) - 12, "-windows.jar") == 0) {
+						printf("Pushing Natives...\n");
+						CreateDirectory("NMCL\\Temp\\natives", NULL);
+						printf("Downloading from \"%s\" to \"%s\"...\n", lpDownloads->Childs->Childs->Childs->Next->Next->Next->lpstrValue, "NMCL\\Temp\\natives\\natives-windows.jar");
+						URLDownloadToFile(NULL, lpDownloads->Childs->Childs->Childs->Next->Next->Next->lpstrValue, "NMCL\\Temp\\natives\\natives-windows.jar", 0, NULL);
+						printf("Extracting File %s...\n", lpLib->Childs->Next->lpstrValue);
+						sprintf(Tmp, "7z.exe e -o%s -y NMCL\\Temp\\natives\\natives-windows.jar *.dll -r", NativesDirectory);
+						printf("Executing Command: %s\n", Tmp);
+						system(Tmp);
+						lpLib = lpLib -> Next;
+						continue;
+					}
 				}
 				printf("Pushing Natives...\n");
 				if(lpLib -> Childs -> Childs -> Next != NULL && lpLib -> Childs -> Childs -> Next -> lpstrKey != NULL && strcmp(lpLib -> Childs -> Childs -> Next -> lpstrKey, "classifiers") == 0) {
@@ -310,7 +591,7 @@ int main(){
 							printf("Downloading from \"%s\" to \"%s\"...\n", lpNatives -> Childs -> Next -> Next -> Next -> lpstrValue, "NMCL\\Temp\\natives\\natives-windows.jar");
 							URLDownloadToFile(NULL, lpNatives -> Childs -> Next -> Next -> Next -> lpstrValue, "NMCL\\Temp\\natives\\natives-windows.jar", 0, NULL);
 							printf("Extracting File %s...\n", lpNatives -> Childs -> lpstrValue);
-							sprintf(Tmp, "7z.exe x -o%s -y NMCL\\Temp\\natives\\natives-windows.jar *.dll", NativesDirectory);
+							sprintf(Tmp, "7z.exe e -o%s -r -y NMCL\\Temp\\natives\\natives-windows.jar *.dll", NativesDirectory);
 							system(Tmp);
 							break;
 						}
@@ -326,7 +607,7 @@ int main(){
 							printf("Downloading from \"%s\" to \"%s\"...\n", lpNatives -> Childs -> Next -> Next -> Next -> lpstrValue, "NMCL\\Temp\\natives\\natives-windows.jar");
 							URLDownloadToFile(NULL, lpNatives -> Childs -> Next -> Next -> Next -> lpstrValue, "NMCL\\Temp\\natives\\natives-windows.jar", 0, NULL);
 							printf("Extracting File %s...\n", lpNatives -> Childs -> lpstrValue);
-							sprintf(Tmp, "7z.exe x -o%s -y NMCL\\Temp\\natives\\natives-windows.jar *.dll", NativesDirectory);
+							sprintf(Tmp, "7z.exe e -o%s -y NMCL\\Temp\\natives\\natives-windows.jar *.dll -r", NativesDirectory);
 							system(Tmp);
 							break;
 						}
@@ -382,6 +663,7 @@ int main(){
 		}
 		lpTmp=lpTmp->Next;
 	}
+	sprintf(VersionPath, "%s\\.minecraft\\versions\\%s", HerePath, VersionName);
 	CloseJson(lpJsonObj);
 	printf("Version Manifest file analysis completed!\n");
 	int i;
@@ -390,14 +672,26 @@ int main(){
 		CreateDirectory(CreateDirs[i], NULL);
 		free(CreateDirs[i]);
 	}
+	pthread_mutex_init(&thread_lock, NULL);
 	for(i=0;i<cDownloads;i++){
 		Replacer(DownloadFiles[i][1]);
-		printf("Downloading from \"%s\" to \"%s\"...\n", DownloadFiles[i][0], DownloadFiles[i][1]);
+		//printf("Downloading from \"%s\" to \"%s\"...\n", DownloadFiles[i][0], DownloadFiles[i][1]);
 		Sleep(10);
+		pthread_t pid;
+		//pthread_create(&pid, NULL, DownloadThread, (void*)DownloadFiles[i]);
 		URLDownloadToFileA(NULL,DownloadFiles[i][0],DownloadFiles[i][1],0,NULL);
 		free(DownloadFiles[i][0]);
 		free(DownloadFiles[i][1]);
-	}
+	}/*
+	while(1) {
+		pthread_mutex_lock(&thread_lock);
+		if(cDownloads == Downloaded) {
+			printf("All files was already downloaded!\n");
+			break;
+		}
+		pthread_mutex_unlock(&thread_lock);
+		Sleep(50);
+	}*/
 	strcat(ClassPath, "${game_directory}\\${version_name}.jar");
 	//ClassPath[strlen(ClassPath) - 1] = '\0';
 	Replacer(ClassPath);
@@ -414,6 +708,7 @@ int main(){
 	ofn.nMaxFile = sizeof(JavaExePath);
 	ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST;
 	SetCurrentDirectoryA(HerePath);
+	pthread_mutex_destroy(&thread_lock);
 	if(GetOpenFileNameA(&ofn) == TRUE) {
 		SetCurrentDirectoryA(HerePath);
 		char Cmd[114514];
